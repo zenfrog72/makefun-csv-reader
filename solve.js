@@ -106,3 +106,131 @@ export function run(input) {
       pos += 1;
     }
   }
+
+  // Reads a quoted field whose opening quote is at pos.
+  // Returns [value, ended].
+  function readQuoted() {
+    const open = pos;
+    const openLine = line;
+    pos += 1;
+    let start = pos;
+    let parts = null; // runs of the field, split at doubled quotes and CRs
+    let value = '';
+    let closed = false;
+    for (;;) {
+      if (pos >= n) break;
+      const c = text.charCodeAt(pos);
+      if (c === 34) {
+        if (text.charCodeAt(pos + 1) === 34) {
+          // A doubled quote is one quote in the field.
+          const run = text.slice(start, pos);
+          if (parts === null) parts = [run, '"'];
+          else parts.push(run, '"');
+          pos += 2;
+          start = pos;
+          continue;
+        }
+        const run = text.slice(start, pos);
+        if (parts === null) value = run;
+        else {
+          parts.push(run);
+          value = parts.join('');
+        }
+        pos += 1;
+        closed = true;
+        break;
+      }
+      if (c === 13) {
+        // CRLF and a lone CR inside quotes are each read as one LF.
+        const run = text.slice(start, pos);
+        if (parts === null) parts = [run, '\n'];
+        else parts.push(run, '\n');
+        line += 1;
+        pos += text.charCodeAt(pos + 1) === 10 ? 2 : 1;
+        start = pos;
+        continue;
+      }
+      if (c === 10) line += 1;
+      pos += 1;
+    }
+    if (!closed) {
+      // The quote never closes: it is a literal character, and the text
+      // after it is read again as an unquoted field.
+      pos = open + 1;
+      line = openLine;
+      errors.push({ code: 'unterminated_quote', line: recordLine, row: recordRow });
+      const again = readUnquoted('"');
+      return [again[0], again[1]];
+    }
+    if (pos >= n) return [value, 2];
+    const c = text.charCodeAt(pos);
+    if (c === 44) {
+      pos += 1;
+      return [value, 0];
+    }
+    if (c === 10) {
+      pos += 1;
+      line += 1;
+      return [value, 1];
+    }
+    if (c === 13 && text.charCodeAt(pos + 1) === 10) {
+      pos += 2;
+      line += 1;
+      return [value, 1];
+    }
+    // What follows the closing quote is appended as it stands, up to the
+    // next comma or line break; that tail is quote junk when it kept a
+    // character (its own stray CRs are reported first, as they are met).
+    const junk = readUnquoted(value);
+    if (junk[2] > 0) errors.push({ code: 'quote_junk', line: recordLine, row: recordRow });
+    return [junk[0], junk[1]];
+  }
+
+  for (;;) {
+    // Lines with no characters are no records.
+    while (pos < n) {
+      const c = text.charCodeAt(pos);
+      if (c === 10) {
+        pos += 1;
+        line += 1;
+      } else if (c === 13 && text.charCodeAt(pos + 1) === 10) {
+        pos += 2;
+        line += 1;
+      } else {
+        break;
+      }
+    }
+    if (pos >= n) break;
+
+    recordLine = line;
+    recordRow = header && columns === null ? null : rows.length;
+    const fields = [];
+    let quoted = false;
+    let ended = 0;
+    do {
+      quoted = text.charCodeAt(pos) === 34;
+      const field = quoted ? readQuoted() : readUnquoted('');
+      fields.push(field[0]);
+      ended = field[1];
+    } while (ended === 0);
+
+    // A line that held only stray CRs is left with no characters: no
+    // record (its stray_cr errors stay).
+    if (fields.length === 1 && fields[0] === '' && !quoted) continue;
+
+    if (width < 0) width = fields.length;
+    if (header && columns === null) {
+      columns = fields;
+      continue;
+    }
+    if (fields.length < width) {
+      errors.push({ code: 'short_row', line: recordLine, row: recordRow, fields: fields.length });
+      while (fields.length < width) fields.push('');
+    } else if (fields.length > width) {
+      errors.push({ code: 'long_row', line: recordLine, row: recordRow, extra: fields.slice(width) });
+      fields.length = width;
+    }
+    rows.push(fields);
+  }
+  return { columns: header ? (columns ?? []) : null, rows, errors };
+}
